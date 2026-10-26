@@ -1,0 +1,12 @@
+rule,severity,ip,path,detail,timestamp,evidence_count
+known_shell_path,high,198.51.100.23,/uploads/shell.php,Path mengandung indikator dikenal: 'shell.php',2026-10-21T10:16:01+07:00,1
+suspicious_query_param,high,198.51.100.23,/index.php?cmd=system(whoami),Query string berisi pola fungsi PHP sensitif,2026-10-21T10:16:05+07:00,1
+scanner_user_agent,low,198.51.100.23,/notfound1,User-Agent mengandung indikator tool: 'sqlmap',2026-10-21T10:16:09+07:00,1
+scanner_user_agent,low,198.51.100.23,/notfound2,User-Agent mengandung indikator tool: 'sqlmap',2026-10-21T10:16:11+07:00,1
+scanner_user_agent,low,198.51.100.23,/notfound3,User-Agent mengandung indikator tool: 'sqlmap',2026-10-21T10:16:13+07:00,1
+scanner_user_agent,low,198.51.100.23,/notfound4,User-Agent mengandung indikator tool: 'sqlmap',2026-10-21T10:16:15+07:00,1
+scanner_user_agent,low,198.51.100.23,/notfound5,User-Agent mengandung indikator tool: 'sqlmap',2026-10-21T10:16:17+07:00,1
+scanner_user_agent,low,198.51.100.23,/notfound6,User-Agent mengandung indikator tool: 'sqlmap',2026-10-21T10:16:19+07:00,1
+known_shell_path,high,203.0.113.77,/adminer.php,Path mengandung indikator dikenal: 'adminer.php',2026-10-21T10:18:00+07:00,1
+scanner_user_agent,low,203.0.113.77,/adminer.php,User-Agent kosong/tidak wajar,2026-10-21T10:18:00+07:00,1
+high_error_rate,high,198.51.100.23,/notfound6,6 response error (404/500) dalam rentang 5 menit dari IP ini (burst terkonsentrasi -> indikasi kuat scanning),2026-10-21T10:16:19+07:00,6

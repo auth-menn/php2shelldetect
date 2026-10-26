@@ -1,0 +1,29 @@
+[
+  {
+    "rule": "known_shell_path",
+    "severity": "high",
+    "ip": "127.0.0.1",
+    "path": "/adminer.php",
+    "detail": "Path mengandung indikator dikenal: 'adminer.php'",
+    "timestamp": "2026-10-24T09:33:26+07:00",
+    "evidence_count": 1
+  },
+  {
+    "rule": "suspicious_query_param",
+    "severity": "high",
+    "ip": "127.0.0.1",
+    "path": "/index.php?cmd=system(whoami)",
+    "detail": "Query string berisi pola fungsi PHP sensitif",
+    "timestamp": "2026-10-24T09:33:36+07:00",
+    "evidence_count": 1
+  },
+  {
+    "rule": "high_error_rate",
+    "severity": "high",
+    "ip": "127.0.0.1",
+    "path": "/notfound4",
+    "detail": "8 response error (404/500) dalam rentang 5 menit dari IP ini (burst terkonsentrasi -> indikasi kuat scanning)",
+    "timestamp": "2026-10-24T09:33:49+07:00",
+    "evidence_count": 8
+  }
+]
