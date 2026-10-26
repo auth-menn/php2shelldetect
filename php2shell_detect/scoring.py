@@ -13,6 +13,29 @@ RULESET_VERSION = "1.0"
 DISCLAIMER = "Based on passive metadata from a single bounded request set."
 SEVERITY_DEDUCTIONS = {"High": 25, "Medium": 12, "Low": 4, "Info": 0}
 GRADE_THRESHOLDS = (("A", 90), ("B", 75), ("C", 60), ("D", 40), ("F", 0))
+SCORING_RULE_IDS = frozenset(
+    {
+        "transport.http",
+        "transport.certificate",
+        "transport.certificate_not_assessed",
+        "headers.metadata_not_assessed",
+        "cookies.metadata_not_assessed",
+        "disclosure.metadata_not_assessed",
+        "headers.hsts",
+        "headers.csp",
+        "headers.csp_weak",
+        "headers.content_type_options",
+        "headers.frame_protection",
+        "headers.referrer_policy",
+        "headers.permissions_policy",
+        "cookies.secure",
+        "cookies.secure_not_assessed",
+        "cookies.httponly",
+        "cookies.samesite",
+        "disclosure.server",
+        "disclosure.powered_by",
+    }
+)
 Severity = Literal["Info", "Low", "Medium", "High"]
 Confidence = Literal["Low", "Medium", "High"]
 
@@ -117,14 +140,14 @@ def evaluate(observations: DomainCheckResult) -> AssessmentResult:
     headers = observations.response_headers
     scheme = observations.final_url.partition(":")[0].lower()
 
-    if scheme == "http":
+    if observations.http_used or scheme == "http":
         findings.append(
             _make_finding(
                 "transport.http",
                 "Unencrypted HTTP used",
                 "Transport",
-                "The final URL uses HTTP without transport encryption.",
-                f"Final URL: {observations.final_url}",
+                "At least one validated request used HTTP without transport encryption.",
+                f"HTTP was used in the redirect chain; final URL: {observations.final_url}",
                 "High",
                 "High",
                 "Serve the site over HTTPS and redirect HTTP to HTTPS after confirming compatibility.",
@@ -161,6 +184,50 @@ def evaluate(observations: DomainCheckResult) -> AssessmentResult:
             )
         )
 
+    if observations.status_code is None:
+        findings.extend(
+            (
+                _make_finding(
+                    "headers.metadata_not_assessed",
+                    "Response headers not assessed",
+                    "Headers",
+                    "Not assessed: no HTTP response headers were available to evaluate.",
+                    "No response headers were trusted or collected.",
+                    "Info",
+                    "Low",
+                    "Retry only after the transport issue has been reviewed.",
+                    "OWASP Secure Headers Project",
+                    status="Not assessed",
+                ),
+                _make_finding(
+                    "cookies.metadata_not_assessed",
+                    "Cookie attributes not assessed",
+                    "Cookies",
+                    "Not assessed: no HTTP response was available to inspect Set-Cookie attributes.",
+                    "No cookie names or values collected.",
+                    "Info",
+                    "Low",
+                    "Review cookie attributes after a valid HTTP response is available.",
+                    "MDN: Set-Cookie",
+                    status="Not assessed",
+                ),
+                _make_finding(
+                    "disclosure.metadata_not_assessed",
+                    "Technology disclosure not assessed",
+                    "Disclosure",
+                    "Not assessed: no response headers were available to evaluate banners.",
+                    "No Server or X-Powered-By values collected.",
+                    "Info",
+                    "Low",
+                    "Review exposed technology banners only when response metadata is available.",
+                    "OWASP Secure Headers Project",
+                    status="Not assessed",
+                ),
+            )
+        )
+        score = max(0, min(100, 100 - sum(item.points_deduction for item in findings)))
+        return AssessmentResult(observations, tuple(findings), score, _grade(score))
+
     if scheme == "https":
         hsts = _header_values(headers, "Strict-Transport-Security")
         if not hsts or not any(re.search(r"(?:^|;)\s*max-age\s*=\s*[1-9][0-9]*", v, re.I) for v in hsts):
@@ -179,6 +246,7 @@ def evaluate(observations: DomainCheckResult) -> AssessmentResult:
             )
 
     csp_values = _header_values(headers, "Content-Security-Policy")
+    nonempty_csp_values = [value for value in csp_values if value.strip()]
     if not csp_values:
         findings.append(
             _make_finding(
@@ -193,8 +261,22 @@ def evaluate(observations: DomainCheckResult) -> AssessmentResult:
                 "MDN: Content-Security-Policy",
             )
         )
+    elif not nonempty_csp_values:
+        findings.append(
+            _make_finding(
+                "headers.csp_weak",
+                "Empty Content Security Policy",
+                "Headers",
+                "A Content-Security-Policy header was present but empty.",
+                "Content-Security-Policy: empty",
+                "Medium",
+                "High",
+                "Define and test a policy appropriate to the application.",
+                "MDN: Content-Security-Policy",
+            )
+        )
     else:
-        joined_csp = "; ".join(csp_values)
+        joined_csp = "; ".join(nonempty_csp_values)
         if re.search(r"(?i)(?:\*|'unsafe-inline'|'unsafe-eval')", joined_csp):
             findings.append(
                 _make_finding(

@@ -24,6 +24,7 @@ def _observations(
         https_used=url.startswith("https:"),
         certificate_valid=certificate_valid,
         checked_at=datetime(2026, 10, 26, tzinfo=timezone.utc),
+        http_used=url.startswith("http:"),
     )
 
 
@@ -73,6 +74,11 @@ def test_potentially_permissive_csp_is_flagged(csp):
     result = evaluate(_observations(headers=[("Content-Security-Policy", csp)]))
     finding = next(f for f in result.findings if f.id == "headers.csp_weak")
     assert finding.severity == "Medium"
+
+
+def test_empty_csp_header_is_treated_as_weak():
+    result = evaluate(_observations(headers=[("Content-Security-Policy", "")]))
+    assert "headers.csp_weak" in _ids(result)
 
 
 def test_valid_headers_and_csp_frame_ancestors_prevent_missing_header_findings():
@@ -169,6 +175,18 @@ def test_not_assessed_information_does_not_deduct_score():
     )
     assert certificate.status == "Not assessed"
     assert certificate.points_deduction == 0
+    assert result.score == 75
+
+
+def test_missing_response_metadata_is_not_penalized_after_tls_failure():
+    result = evaluate(_observations(certificate_valid=False, status=None))
+    not_assessed = [finding for finding in result.findings if finding.status == "Not assessed"]
+    assert {finding.id for finding in not_assessed} == {
+        "headers.metadata_not_assessed",
+        "cookies.metadata_not_assessed",
+        "disclosure.metadata_not_assessed",
+    }
+    assert all(finding.points_deduction == 0 for finding in not_assessed)
     assert result.score == 75
 
 

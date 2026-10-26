@@ -1,8 +1,7 @@
-"""php2shell_detect: toolkit deteksi defensif untuk log web server PHP/Laravel.
+"""Defensive web-log analysis and bounded passive HTTP metadata assessment.
 
-Paket ini HANYA berisi logika analisis pasif (membaca & mengklasifikasikan log).
-Tidak ada fungsi yang mengirim request, membangun payload, atau mengeksekusi
-perintah terhadap target mana pun.
+Log analysis remains local. The optional target assessment performs a small,
+IP-validated set of metadata-only HEAD requests after explicit user consent.
 """
 
 __version__ = "0.1.0"

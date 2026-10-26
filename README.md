@@ -9,13 +9,14 @@ melakukan crawling, eksploitasi, port scanning, atau endpoint discovery.
 Target assessment membatasi request hingga lima termasuk redirect yang
 divalidasi, memeriksa semua alamat DNS sebelum terhubung, dan mem-pin koneksi
 ke IP publik yang divalidasi. Skor adalah rekomendasi hardening dari metadata
-pasif, bukan bukti adanya kerentanan.
+pasif, bukan bukti adanya kerentanan. Connect/read timeout adalah 5 detik dan
+header response dibatasi 64 KiB / 100 field.
 
 ## Menjalankan
 
 ```bash
 pip install pytest
-python -m pytest tests/ -v   # harus: 22 passed
+python -m pytest tests/ -v
 
 python -m php2shell_detect.cli \
   --log tests/fixtures/sample_access.log \
@@ -42,7 +43,21 @@ Penilaian terbatas pada metadata dari satu set request yang dibatasi dan tidak
 memastikan kerentanan. Banner versi dapat spoof/generik dan tidak dipetakan ke
 CVE. Nilai cookie tidak disimpan atau diekspor; hanya nama dan atributnya.
 Ekspor JSON/CSV mencakup target, URL final, score, findings, timestamp, dan
-disclaimer.
+disclaimer. Pilih finding untuk membuka **Panduan Verifikasi Manual** yang
+menjelaskan pemeriksaan pasif, hasil yang diharapkan, kemungkinan false positive,
+dan referensi. Perintah hanya dapat disalin dan tidak pernah dijalankan aplikasi;
+jalankan sendiri hanya jika diizinkan oleh scope dan rules of engagement. Status
+verifikasi dan catatan tersimpan di memori selama sesi, tidak mengubah score, dan
+ikut disertakan pada ekspor JSON/CSV. **Ekspor Panduan (Markdown)** menghasilkan
+checklist untuk draft laporan. Guide version dicatat pada JSON.
+
+Periksa header melalui DevTools atau perintah `curl.exe`/PowerShell yang
+ditampilkan. Tinjau header mentah dengan hati-hati dan jangan membagikan nilai
+cookie, token, atau data akun.
+
+Hardening Score dimulai dari 100 dan mengurangi High 25, Medium 12, Low 4,
+Info 0 poin per finding; score dibatasi ke 0–100. Grade: A (90+), B (75–89),
+C (60–74), D (40–59), F (<40). Aturan memakai `RULESET_VERSION = "1.0"`.
 
 `--time-window-minutes` opsional. Tanpa diisi, rule `high_error_rate`
 memakai perilaku lama (hitung total error, severity selalu "medium").
@@ -57,7 +72,8 @@ severity "high" (burst = indikasi kuat scanning otomatis).
 - `php2shell_detect/cli.py` — entry point (argparse), streaming penuh dari file ke laporan
 - `php2shell_detect/domain_check.py` — parsing target, validasi IP publik, koneksi IP-pinned, dan pengumpulan metadata terbatas
 - `php2shell_detect/scoring.py` — aturan severity dan Hardening Score deterministik (terpisah dari engine log)
-- `php2shell_detect/assessment_report.py` — ekspor JSON/CSV untuk assessment metadata
+- `php2shell_detect/verification_guide.py` — panduan verifikasi manual statis dan perender perintah copy-only
+- `php2shell_detect/assessment_report.py` — ekspor JSON/CSV/Markdown untuk assessment metadata
 - `tests/fixtures/sample_access.log` — data log SINTETIS untuk testing
 - `tests/` — unit tests log dan assessment; assessment menggunakan DNS/jaringan mock (tanpa request publik)
 
@@ -84,7 +100,7 @@ severity "high" (burst = indikasi kuat scanning otomatis).
 ## Batasan yang disengaja (by design)
 
 - Analisis file log tidak mengirim HTTP request.
-- Assessment target hanya mengirim GET untuk URL yang dimasukkan pengguna, setelah validasi DNS/IP publik; jumlah request maksimum lima termasuk redirect.
+- Assessment target hanya mengirim HEAD untuk URL yang dimasukkan pengguna, setelah validasi DNS/IP publik; jumlah request maksimum lima termasuk redirect.
 - Tidak ada payload/exploit code.
 - Severity "low" pada scanner_user_agent sengaja rendah karena false-positive-prone.
 - Evasion encoding ganda pada query param (double URL-encoding) belum ditangani — batasan yang diketahui, belum masuk prioritas perbaikan saat ini.

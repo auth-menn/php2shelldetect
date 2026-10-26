@@ -1,8 +1,14 @@
 from datetime import datetime, timezone
 
-from gui import assessment_finding_to_row, filter_assessment_findings
+from gui import (
+    assessment_finding_to_row,
+    filter_assessment_findings,
+    sanitize_display_text,
+    select_finding_guide,
+)
 from php2shell_detect.domain_check import DomainCheckResult
 from php2shell_detect.scoring import evaluate
+from php2shell_detect.verification_guide import GUIDES
 
 
 def test_gui_result_mapping_includes_finding_fields_and_not_assessed_status():
@@ -48,3 +54,13 @@ def test_gui_severity_filter_only_returns_matching_findings():
         finding.severity == "Medium"
         for finding in filter_assessment_findings(findings, "Medium")
     )
+
+
+def test_gui_finding_selection_maps_to_static_guide():
+    assert select_finding_guide("headers.hsts") is GUIDES["headers.hsts"]
+    assert select_finding_guide("unknown.rule") is None
+
+
+def test_display_sanitizer_strips_control_characters_and_truncates():
+    assert sanitize_display_text("header\x00value\nnext", limit=30) == "headervaluenext"
+    assert sanitize_display_text("abcdef", limit=3) == "abc…"

@@ -9,7 +9,7 @@ import socket
 import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 
 DEFAULT_TIMEOUT_SECONDS = 5
 MAX_REQUESTS = 5
@@ -17,9 +17,15 @@ MAX_RESPONSE_HEADER_BYTES = 65536
 MAX_RESPONSE_HEADERS = 100
 _ALLOWED_SCHEMES = ("http", "https")
 _USER_AGENT = "php2shell-detect/2.0 (bounded passive metadata assessment)"
+_SPECIAL_IPV6_NETWORKS = tuple(
+    ipaddress.ip_network(network)
+    for network in ("::/96", "64:ff9b::/96", "64:ff9b:1::/48", "2001::/32", "2002::/16")
+)
+_SPECIAL_IPV4_NETWORKS = (ipaddress.ip_network("192.0.0.0/24"),)
 ASSESSMENT_SCOPE = (
-    "Single user-supplied URL; metadata-only GET; at most 5 validated requests "
-    "including redirects; no crawling or endpoint discovery."
+    "Single user-supplied URL; HEAD only; max 5 requests including individually "
+    "validated redirects; 5-second connect/read timeout; response headers capped "
+    "at 64 KiB/100 fields; no crawling or endpoint discovery."
 )
 _SECURITY_HEADERS = (
     "Strict-Transport-Security",
@@ -29,7 +35,18 @@ _SECURITY_HEADERS = (
     "Referrer-Policy",
     "Permissions-Policy",
 )
-_SENSITIVE_HEADER_MARKERS = ("authorization", "cookie", "token", "secret", "password", "api-key")
+_SENSITIVE_HEADER_MARKERS = (
+    "authorization",
+    "authenticate",
+    "cookie",
+    "token",
+    "secret",
+    "password",
+    "apikey",
+    "privatekey",
+    "session",
+    "location",
+)
 _HEADER_NAME = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _STATUS_LINE = re.compile(rb"^HTTP/1\.[01] ([0-9]{3})(?: .*)?\r?\n$")
 _SCHEME_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:(?![0-9])")
@@ -88,6 +105,7 @@ class DomainCheckResult:
     certificate_valid: bool | None
     checked_at: datetime
     scope: str = ASSESSMENT_SCOPE
+    http_used: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -100,6 +118,7 @@ class DomainCheckResult:
             ],
             "cookies": [cookie.to_dict() for cookie in self.cookies],
             "https_used": self.https_used,
+            "http_used": self.http_used,
             "certificate_valid": self.certificate_valid,
             "timestamp": self.checked_at.isoformat(),
             "scope": self.scope,
@@ -110,7 +129,10 @@ def normalize_url(raw_input: str) -> str:
     """Validate a target and return a URL, adding HTTPS only when no scheme exists."""
     if not isinstance(raw_input, str) or not raw_input:
         raise ValidationError("Target must be a non-empty URL, domain, or IP address.")
-    if any(character.isspace() for character in raw_input) or "\\" in raw_input:
+    if any(
+        character.isspace() or ord(character) < 32 or ord(character) == 127
+        for character in raw_input
+    ) or "\\" in raw_input:
         raise ValidationError("Whitespace and backslashes are not allowed in a target.")
 
     raw = raw_input
@@ -120,6 +142,10 @@ def normalize_url(raw_input: str) -> str:
         literal_ip = None
     if isinstance(literal_ip, ipaddress.IPv6Address):
         raw = f"https://[{literal_ip.compressed}]"
+    elif re.match(r"^(?:http|https):", raw, re.IGNORECASE) and not re.match(
+        r"^(?:http|https)://", raw, re.IGNORECASE
+    ):
+        raise ValidationError("An explicit http/https scheme must include '://'.")
     elif not re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", raw) and not _SCHEME_PREFIX.match(raw):
         raw = f"https://{raw}"
 
@@ -132,9 +158,11 @@ def normalize_url(raw_input: str) -> str:
     scheme = parsed.scheme.lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise ValidationError("Only http:// and https:// targets are supported.")
+    if parsed.netloc.endswith(":"):
+        raise ValidationError("A port separator must be followed by a valid port.")
     if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
         raise ValidationError("URL credentials are not allowed.")
-    if parsed.fragment:
+    if parsed.fragment or "#" in raw:
         raise ValidationError("URL fragments are not allowed.")
     if not parsed.hostname or not parsed.netloc:
         raise ValidationError("The URL must include a hostname.")
@@ -172,15 +200,25 @@ def normalize_url(raw_input: str) -> str:
 
     if port is not None and not 1 <= port <= 65535:
         raise ValidationError("Port must be between 1 and 65535.")
-    effective_port = port or (443 if scheme == "https" else 80)
     netloc = f"{netloc_host}:{port}" if port is not None else netloc_host
-    return urlunsplit((scheme, netloc, parsed.path, parsed.query, ""))
+    if re.search(r"%(?![0-9A-Fa-f]{2})", parsed.path + parsed.query):
+        raise ValidationError("URL path and query must use valid percent escapes.")
+    path = quote(parsed.path, safe="/%:@!$&'()*+,;=-._~")
+    query = quote(parsed.query, safe="/?@!$&'()*+,;=-._~%")
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def _is_public_ip(value: str) -> bool:
     address = ipaddress.ip_address(value.split("%", 1)[0])
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped:
-        address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address):
+        if address.ipv4_mapped:
+            address = address.ipv4_mapped
+        elif any(address in network for network in _SPECIAL_IPV6_NETWORKS):
+            return False
+    if isinstance(address, ipaddress.IPv4Address) and any(
+        address in network for network in _SPECIAL_IPV4_NETWORKS
+    ):
+        return False
     return (
         address.is_global
         and not address.is_loopback
@@ -257,6 +295,11 @@ def _read_response(sock: socket.socket) -> tuple[int, list[tuple[str, str]]]:
                 raise HttpResponseError("The target returned a malformed HTTP header.") from exc
             if not _HEADER_NAME.fullmatch(name):
                 raise HttpResponseError("The target returned an invalid HTTP header name.")
+            if any(
+                (ord(character) < 32 and character != "\t") or ord(character) == 127
+                for character in value
+            ):
+                raise HttpResponseError("The target returned a control character in a header.")
             headers.append((name, value))
         return status, headers
     finally:
@@ -270,25 +313,19 @@ def _request_once(
     request_path = parsed.path or "/"
     if parsed.query:
         request_path += f"?{parsed.query}"
-    peer_ip: str | None = None
     sock: socket.socket | None = None
     try:
-        last_error: OSError | None = None
-        for address in target.addresses:
-            try:
-                candidate = socket.create_connection((address, target.port), timeout=timeout)
-                peer_ip = candidate.getpeername()[0].split("%", 1)[0]
-                if ipaddress.ip_address(peer_ip) != ipaddress.ip_address(address):
-                    candidate.close()
-                    raise NetworkError("Connected peer did not match the validated IP address.")
-                sock = candidate
-                break
-            except NetworkError:
-                raise
-            except OSError as exc:
-                last_error = exc
-        if sock is None:
-            raise last_error or OSError("Unable to connect to a validated address.")
+        if not target.addresses:
+            raise NetworkError("No validated IP address is available.")
+        address = target.addresses[0]
+        sock = socket.create_connection((address, target.port), timeout=timeout)
+        peer_ip = sock.getpeername()[0].split("%", 1)[0]
+        try:
+            peer_matches = ipaddress.ip_address(peer_ip) == ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise NetworkError("Connected peer returned an invalid IP address.") from exc
+        if not peer_matches:
+            raise NetworkError("Connected peer did not match the validated IP address.")
         sock.settimeout(timeout)
         certificate_valid: bool | None = None
         if target.scheme == "https":
@@ -298,7 +335,7 @@ def _request_once(
 
         host_header = parsed.netloc
         request = (
-            f"GET {request_path} HTTP/1.1\r\n"
+            f"HEAD {request_path} HTTP/1.1\r\n"
             f"Host: {host_header}\r\n"
             f"User-Agent: {_USER_AGENT}\r\n"
             "Accept: */*\r\n"
@@ -327,8 +364,10 @@ def _safe_response_headers(headers: list[tuple[str, str]]) -> tuple[tuple[str, s
     return tuple(
         (name, value)
         for name, value in headers
-        if name.lower() != "set-cookie"
-        and not any(marker in name.lower() for marker in _SENSITIVE_HEADER_MARKERS)
+        if not any(
+            marker in re.sub(r"[^a-z0-9]", "", name.lower())
+            for marker in _SENSITIVE_HEADER_MARKERS
+        )
     )
 
 
@@ -363,9 +402,13 @@ def check_domain(raw_input: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Do
     final_status: int | None = None
     final_headers: list[tuple[str, str]] = []
     certificate_valid: bool | None = None
+    http_used = False
+    https_used = False
 
     for request_number in range(MAX_REQUESTS):
         target = validate_target(current_url)
+        http_used = http_used or target.scheme == "http"
+        https_used = https_used or target.scheme == "https"
         try:
             status, headers, certificate_valid = _request_once(target, timeout)
         except ssl.SSLCertVerificationError:
@@ -381,6 +424,7 @@ def check_domain(raw_input: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Do
                 https_used=True,
                 certificate_valid=False,
                 checked_at=datetime.now(timezone.utc),
+                http_used=http_used,
             )
         final_status, final_headers = status, headers
         if status not in (301, 302, 303, 307, 308):
@@ -407,9 +451,10 @@ def check_domain(raw_input: str, timeout: float = DEFAULT_TIMEOUT_SECONDS) -> Do
         status_code=final_status,
         response_headers=_safe_response_headers(final_headers),
         cookies=_parse_cookies(final_headers),
-        https_used=parsed_final.scheme == "https",
+        https_used=https_used,
         certificate_valid=certificate_valid if parsed_final.scheme == "https" else None,
         checked_at=datetime.now(timezone.utc),
+        http_used=http_used,
     )
 
 

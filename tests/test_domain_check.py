@@ -17,6 +17,7 @@ from php2shell_detect.domain_check import (
     normalize_url,
     validate_target,
 )
+from php2shell_detect.scoring import evaluate
 
 
 def _dns_answers(*addresses):
@@ -78,6 +79,7 @@ def test_normalize_url_keeps_explicit_http_and_https_path():
         ("https://[2606:4700:4700::1111]/health", "https://[2606:4700:4700::1111]/health"),
         ("bücher.example", "https://xn--bcher-kva.example"),
         ("example.com:8443/path", "https://example.com:8443/path"),
+        ("https://example.com/café", "https://example.com/caf%C3%A9"),
     ],
 )
 def test_normalize_url_accepts_domains_urls_ips_and_idn(target, expected):
@@ -93,8 +95,11 @@ def test_normalize_url_accepts_domains_urls_ips_and_idn(target, expected):
         "example.com ",
         "https://example .com",
         "https://example.com/a\tb",
+        "https://example.com\x00",
         "ftp://example.com",
         "mailto:user@example.com",
+        "http:80",
+        "https:443",
         "https://",
         "https:///path",
         "https://-bad.example",
@@ -103,8 +108,10 @@ def test_normalize_url_accepts_domains_urls_ips_and_idn(target, expected):
         "https://user:pass@example.com",
         "https://example.com/#fragment",
         "https://example.com:0",
+        "https://example.com:",
         "https://example.com:65536",
         "https://example.com:notaport",
+        "https://example.com/%zz",
         "https://[2001:db8::1",
         "https://2001:db8::1",
     ],
@@ -127,8 +134,14 @@ def test_domain_check_error_remains_compatibility_alias():
         "224.0.0.1",
         "0.0.0.0",
         "192.0.2.1",
+        "192.0.0.9",
         "::",
         "::1",
+        "::808:808",
+        "64:ff9b::808:808",
+        "64:ff9b:1::808:808",
+        "2001::1",
+        "2002:808:808::",
         "fc00::1",
         "fe80::1",
         "ff02::1",
@@ -219,7 +232,7 @@ def test_request_pins_to_validated_ip_and_reads_metadata_only(monkeypatch):
     assert status == 200
     assert headers == [("Server", "example")]
     assert certificate_valid is None
-    assert b"GET /check?q=1 HTTP/1.1" in fake.request
+    assert b"HEAD /check?q=1 HTTP/1.1" in fake.request
     assert b"Host: example.com" in fake.request
     assert fake.closed
 
@@ -253,6 +266,29 @@ def test_connection_timeout_and_connection_errors_are_network_errors(monkeypatch
         check_domain("http://example.com")
 
 
+def test_response_read_timeout_is_a_network_error(monkeypatch):
+    _mock_dns(monkeypatch)
+
+    class TimedOutReader:
+        def readline(self, _limit):
+            raise socket.timeout("read timeout")
+
+        def close(self):
+            pass
+
+    class ReadTimeoutSocket(FakeSocket):
+        def makefile(self, _mode):
+            return TimedOutReader()
+
+    monkeypatch.setattr(
+        domain_check.socket,
+        "create_connection",
+        lambda address, timeout: ReadTimeoutSocket(),
+    )
+    with pytest.raises(NetworkError, match="timed out"):
+        check_domain("http://example.com")
+
+
 def test_tls_certificate_validation_failure_is_an_observation(monkeypatch):
     _mock_dns(monkeypatch)
     fake = FakeSocket()
@@ -268,6 +304,38 @@ def test_tls_certificate_validation_failure_is_an_observation(monkeypatch):
     assert result.certificate_valid is False
     assert result.status_code is None
     assert result.https_used
+
+
+def test_tls_certificate_validation_success_is_reported(monkeypatch):
+    fake = FakeSocket()
+    monkeypatch.setattr(domain_check.socket, "create_connection", lambda address, timeout: fake)
+
+    class ValidCertificateContext:
+        def wrap_socket(self, sock, server_hostname):
+            assert sock is fake
+            assert server_hostname == "example.com"
+            return sock
+
+    monkeypatch.setattr(domain_check.ssl, "create_default_context", ValidCertificateContext)
+    target = domain_check.ValidatedTarget(
+        "https://example.com", "example.com", 443, "https", ("8.8.8.8",)
+    )
+    _status, _headers, certificate_valid = domain_check._request_once(target, 1)
+    assert certificate_valid is True
+
+
+def test_validated_request_count_is_capped_at_five(monkeypatch):
+    _mock_dns(monkeypatch)
+    requested = []
+
+    def redirect(target, _timeout):
+        requested.append(target.url)
+        return 302, [("Location", "/next")], None
+
+    monkeypatch.setattr(domain_check, "_request_once", redirect)
+    with pytest.raises(HttpResponseError, match="maximum 5"):
+        check_domain("http://example.com")
+    assert len(requested) == domain_check.MAX_REQUESTS == 5
 
 
 def test_redirect_to_private_ip_is_rejected_before_second_request(monkeypatch):
@@ -309,6 +377,24 @@ def test_redirects_are_manual_and_final_url_is_reported(monkeypatch):
     assert result.certificate_valid is True
 
 
+def test_http_redirecting_to_https_is_still_reported_as_http_used(monkeypatch):
+    _mock_dns(monkeypatch)
+    results = iter(
+        [
+            (301, [("Location", "https://example.com/secure")], None),
+            (200, [("Strict-Transport-Security", "max-age=31536000")], True),
+        ]
+    )
+    monkeypatch.setattr(
+        domain_check, "_request_once", lambda _target, _timeout: next(results)
+    )
+    result = check_domain("http://example.com/")
+    assert result.final_url == "https://example.com/secure"
+    assert result.http_used
+    assert result.https_used
+    assert "transport.http" in {finding.id for finding in evaluate(result).findings}
+
+
 def test_response_headers_are_bounded_and_malformed_responses_rejected():
     with pytest.raises(HttpResponseError, match="invalid HTTP status"):
         domain_check._read_response(FakeSocket(b"not HTTP\r\n\r\n"))
@@ -346,3 +432,23 @@ def test_check_domain_has_no_live_network_dependency(monkeypatch):
     assert result.cookies[0].name == "session"
     assert result.cookies[0].secure and result.cookies[0].httponly
     assert "secret-value" not in str(result.to_dict())
+
+
+def test_response_export_omits_cookie_auth_token_and_redirect_headers():
+    safe = domain_check._safe_response_headers(
+        [
+            ("Server", "nginx"),
+            ("Set-Cookie", "session=secret"),
+            ("X-API_Key", "secret"),
+            ("X-Session-Token", "secret"),
+            ("WWW-Authenticate", "Bearer secret"),
+            ("Location", "https://example.com/?token=secret"),
+        ]
+    )
+    assert safe == (("Server", "nginx"),)
+
+
+def test_response_parser_rejects_control_characters_in_header_values():
+    response = FakeSocket(b"HTTP/1.1 200 OK\r\nX-Header: bad\x00value\r\n\r\n")
+    with pytest.raises(HttpResponseError, match="control character"):
+        domain_check._read_response(response)
